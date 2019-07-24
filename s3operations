@@ -1,0 +1,78 @@
+import boto3
+import logging
+import datetime
+import importlib
+import os
+
+
+s3 = boto3.resource('s3')
+logger = logging.getLogger('s3FileOperation')
+logger.setLevel(logging.INFO)
+curr_env = os.environ['AWS_ENVIRONMENT']
+logger.info('CURR_AWS_ENVIRONMENT : %s', curr_env)
+cfg = importlib.import_module('config_' + curr_env)
+
+def s3_connection(bucket_name):
+    logger.info("s3_connection(%s) : started", bucket_name)
+    bucketObject = s3.Bucket(bucket_name)
+    logger.info("s3_connection(%s) : completed", bucket_name)
+    return bucketObject
+
+
+def get_all_files(bucketObject, prefix=""):
+    listAllFiles=[]
+    for obj in bucketObject.objects.filter(Prefix=prefix):
+        listAllFiles.append(obj.key)
+    return listAllFiles
+
+
+def read_file(bucketName, filePath):
+    logger.info("read_file(%s, %s) : started", bucketName,  filePath)
+    obj = s3.Object(bucket_name=bucketName, key=filePath)
+    response=obj.get()
+    logger.info("File path %s" , filePath.upper())
+    
+    if 'unicodefiles'.upper() in filePath.upper() :
+        r = response['Body'].read().decode('unicode-escape', errors='ignore')
+        logger.info("read_file(%s, %s) : completed - length %d", bucketName,  filePath, len(r))
+        return str(r).encode("utf-8", "replace").decode()
+    elif 'textfiles'.upper() in filePath.upper():
+        data=response['Body'].read().decode('latin_1', errors='ignore')
+        r = str(data).encode("utf-8", "replace").decode()
+        #print(r)
+        logger.info("read_file-PRD_product(%s, %s) : completed - length %d", bucketName,  filePath, len(r))
+        return r
+    else:
+        data=response['Body'].read()
+        r = str(data, 'utf-8')
+        logger.info("read_file-AUM(%s, %s) : completed - length %d", bucketName,  filePath, len(r))
+        return r
+
+def write_files(bucketName, fileStr, fileName, folderName="", optionalString=""):
+    sse_kms_keyid = cfg.sse_kms_keyid
+    fileKey = folderName + fileName + optionalString
+    
+    logger.info("write_files(%s, %s) : started - writing stringlen:%d", bucketName,  fileKey, len(fileStr))
+    object = s3.Object(bucketName, fileKey)
+    object.put(Body=fileStr,ACL='private',ServerSideEncryption='aws:kms',SSEKMSKeyId=sse_kms_keyid)
+    logger.info("write_files(%s, %s) : completed", bucketName,  fileKey)
+
+def move_file(bucket_name,currentFilePath,target_file_path):
+    sse_kms_keyid = cfg.sse_kms_keyid
+    #fileKey = folderName + fileName + optionalString
+    currentFilePath = "RAW_CURR/Salesforce_DataMirror_ProductRatings_1.0_20190529T221318_Delta.dat"
+    source= { 'Bucket' : bucket_name, 'Key': currentFilePath}
+    dest = s3.Bucket(bucket_name)
+    extra_args={'ACL':'private','ServerSideEncryption':'aws:kms','SSEKMSKeyId':sse_kms_keyid}
+    dest.copy(source,target_file_path, ExtraArgs=extra_args)
+    arch_prefix= datetime.datetime.now().isoformat(timespec='seconds').replace("-",'').replace(":",'')
+    last_occur=target_file_path.rfind("/")
+    arch_file_name="{}{}{}{}".format(target_file_path[:last_occur+1],arch_prefix,"_",target_file_path[last_occur+1:])
+    dest.copy(source,arch_file_name, ExtraArgs=extra_args)
+    delete_file(bucket_name, currentFilePath)
+    logger.info("File %s copied to target location",currentFilePath)
+
+def delete_file(bucketName, filePath):
+    logger.info("delete_file(%s, %s) : started", bucketName,  filePath)
+    s3.Object(bucketName, filePath).delete()
+    logger.info("delete_file(%s, %s) : completed", bucketName,  filePath)
